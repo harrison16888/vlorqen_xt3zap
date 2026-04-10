@@ -19,7 +19,10 @@ MAX_RETRIES = 3
 TOPIC_LIMIT = int(os.environ.get("TOPIC_LIMIT", "3"))
 
 # Percentage (0.0 - 1.0) chance that a given story uses artistic mode vs photographic mode
-ART_PERCENTAGE = float(os.environ.get("ART_PERCENTAGE", "0.66"))
+ART_PERCENTAGE = float(os.environ.get("ART_PERCENTAGE", "0.33"))
+
+# Percentage (0.0 - 1.0) chance that human subjects are replaced with anthropomorphic animals
+ANTHROPOMORPHIC_PERCENTAGE = float(os.environ.get("ANTHROPOMORPHIC_PERCENTAGE", "0.3"))
 
 # Popular artistic styles cycled IN ORDER (round-robin). Never randomized.
 # Set via env as a pipe-separated string, e.g.:
@@ -775,7 +778,7 @@ Details: {item['description']}"""
 
         anthro_chance = random.random()
         anthro_modifier = ""
-        if anthro_chance > 0.5:
+        if anthro_chance < ANTHROPOMORPHIC_PERCENTAGE:
             anthro_types = ["anthropomorphic animals", "cute anthropomorphic cats and dogs", "anthropomorphic fantasy creatures", "anthropomorphic animals in business attire", "whimsical anthropomorphic wildlife"]
             selected_anthro = random.choice(anthro_types)
             anthro_modifier = f" KEY DIRECTIVE: Re-imagine all human subjects and participants as {selected_anthro}."
