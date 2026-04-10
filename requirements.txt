@@ -1,0 +1,12 @@
+opencv-python
+mss
+numpy
+pyautogui
+google-auth
+google-auth-oauthlib
+google-api-python-client
+google-auth-httplib2
+pyperclip
+Pillow
+yt-dlp
+edge-tts

@@ -1,0 +1,159 @@
+on:
+  workflow_dispatch:
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    env:
+      TZ: 'America/Los_Angeles'
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install -r requirements.txt
+
+      - name: Restore Antigravity Data Session
+        uses: actions/cache/restore@v3
+        with:
+          path: ~/.antigravity_tools
+          key: antigravity-data-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            antigravity-data-${{ runner.os }}-
+
+      - name: Create session directories
+        run: mkdir -p ~/.browser-session
+
+      - name: Restore browser session
+        uses: actions/cache/restore@v3
+        with:
+          path: ~/.browser-session
+          key: v-browser-session-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            v-browser-session-${{ runner.os }}-
+
+      - name: Clear stale browser locks
+        run: |
+          rm -f ~/.browser-session/SingletonLock
+          rm -f ~/.browser-session/SingletonCookie
+          find ~/.browser-session -name "lockfile" -delete || true
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libgbm1 ffmpeg
+          wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+          sudo sh -c 'echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" >> /etc/apt/sources.list.d/google-chrome.list'
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable
+
+      - name: Install Deno
+        run: |
+          curl -fsSL https://deno.land/install.sh | sh
+          echo "$HOME/.deno/bin" >> $GITHUB_PATH
+
+      - name: Cache Antigravity Docker Image
+        uses: actions/cache@v3
+        id: cache-antigravity
+        with:
+          path: /tmp/antigravity-image.tar
+          key: antigravity-docker-v1
+
+      - name: Download & Save Docker Image
+        if: steps.cache-antigravity.outputs.cache-hit != 'true'
+        run: |
+          docker pull lbjlaq/antigravity-manager:latest
+          docker save lbjlaq/antigravity-manager:latest -o /tmp/antigravity-image.tar
+
+      - name: Load Cached Docker Image
+        if: steps.cache-antigravity.outputs.cache-hit == 'true'
+        run: docker load -i /tmp/antigravity-image.tar
+
+      - name: Start Antigravity Manager via Docker
+        run: |
+          docker run -d --name antigravity-manager \
+            --restart always \
+            -p 8045:8045 \
+            -e API_KEY="${{ secrets.ANTIGRAVITY_API_KEY }}" \
+            -e NO_CACHE=true \
+            -v ~/.antigravity_tools:/root/.antigravity_tools \
+            -v ~/.browser-session:/root/.browser-session \
+            lbjlaq/antigravity-manager:latest
+
+      - name: Wait for Antigravity Manager to initialize
+        run: |
+          sleep 10
+          curl -f http://127.0.0.1:8045/v1/models || echo "API still starting, proceeding..."
+          sleep 10
+
+      - name: Create Google Credentials & Cookies
+        run: |
+          if [ -n "${{ secrets.GOOGLE_DRIVE_CREDENTIALS }}" ]; then
+            echo "${{ secrets.GOOGLE_DRIVE_CREDENTIALS }}" > credentials.json
+          fi
+          if [ -n "${{ secrets.GOOGLE_DRIVE_TOKEN }}" ]; then
+            echo "${{ secrets.GOOGLE_DRIVE_TOKEN }}" | base64 --decode > token.json
+          fi
+          if [ -n "${{ secrets.YOUTUBE_COOKIES }}" ]; then
+            echo "${{ secrets.YOUTUBE_COOKIES }}" > cookies.txt
+            echo "✅ cookies.txt deployed ($(wc -l < cookies.txt) lines)"
+          else
+            echo "⚠️ YOUTUBE_COOKIES secret not set — yt-dlp may fail authentication."
+          fi
+
+      - name: Run Pipeline
+        env:
+          API_KEY: ${{ secrets.ANTIGRAVITY_API_KEY }}
+          API_BASE_URL: http://127.0.0.1:8045/v1
+          V_URL: ${{ secrets.V_URL }}
+        run: |
+          mkdir -p logs
+          Xvfb :99 -screen 0 1280x960x24 &
+          export DISPLAY=:99
+          sleep 3
+
+          google-chrome \
+            --no-sandbox \
+            --disable-dev-shm-usage \
+            --disable-gpu \
+            --remote-debugging-port=9222 \
+            --disable-session-crashed-bubble \
+            --no-first-run \
+            --no-default-browser-check \
+            --disable-infobars \
+            --window-size=1280,960 \
+            --window-position=0,0 \
+            --user-data-dir="$HOME/.browser-session" \
+            "${V_URL:-https://example.com/}" > logs/chrome_startup.log 2>&1 &
+          sleep 12
+
+          .venv/bin/python scripts/pipeline.py
+
+      - name: Save Antigravity Data Session
+        if: always()
+        uses: actions/cache/save@v3
+        with:
+          path: ~/.antigravity_tools
+          key: antigravity-data-${{ runner.os }}-${{ github.run_id }}
+
+      - name: Save browser session
+        if: always()
+        uses: actions/cache/save@v3
+        with:
+          path: ~/.browser-session
+          key: v-browser-session-${{ runner.os }}-${{ github.run_id }}
