@@ -18,6 +18,33 @@ API_BASE_URL = os.environ.get("API_BASE_URL", "http://127.0.0.1:8045/v1")
 MAX_RETRIES = 3
 TOPIC_LIMIT = int(os.environ.get("TOPIC_LIMIT", "3"))
 
+# Percentage (0.0 - 1.0) chance that a given story uses artistic mode vs photographic mode
+ART_PERCENTAGE = float(os.environ.get("ART_PERCENTAGE", "0.66"))
+
+# Popular artistic styles cycled IN ORDER (round-robin). Never randomized.
+# Set via env as a pipe-separated string, e.g.:
+#   POPULAR_ARTISTIC_STYLES="Studio Ghibli watercolor|Pixar 3D cinematic|Synthwave retro 80s neon"
+_ARTISTIC_STYLES_DEFAULT = (
+    "Studio Ghibli watercolor illustration style|"
+    "Pixar 3D cinematic render style|"
+    "Synthwave retro 80s neon poster style|"
+    "Ukiyo-e Japanese woodblock print style|"
+    "Marvel Comics bold ink and color style|"
+    "LEGO brick diorama style|"
+    "Impressionist oil painting style (Monet)|"
+    "GTA V loading screen poster style|"
+    "Cyberpunk 2077 concept art style|"
+    "Disney golden-age hand-drawn animation style"
+)
+POPULAR_ARTISTIC_STYLES = [
+    s.strip()
+    for s in os.environ.get("POPULAR_ARTISTIC_STYLES", _ARTISTIC_STYLES_DEFAULT).split("|")
+    if s.strip()
+]
+
+# Persistent index tracking which style to use next (cycles through the list)
+_artistic_style_index = 0
+
 def get_drive_service():
     try:
         from google.oauth2.credentials import Credentials
@@ -628,6 +655,36 @@ def combine_audio(voice_file, bg_file, output_file):
 def clean_filename(name):
     return re.sub(r'[\\/*?:"<>|]', "", name).strip()
 
+def pick_visual_style(title):
+    """
+    Decides whether to use artistic or photographic mode based on ART_PERCENTAGE,
+    then returns (is_artistic, image_style, mode_desc).
+
+    - Artistic mode: cycles through POPULAR_ARTISTIC_STYLES IN ORDER (round-robin).
+    - Photographic mode: picks randomly from photographic categories (unchanged behaviour).
+    """
+    global _artistic_style_index
+
+    is_artistic_mode = random.random() < ART_PERCENTAGE
+
+    if is_artistic_mode:
+        # Round-robin through the ordered popular artistic styles list
+        style = POPULAR_ARTISTIC_STYLES[_artistic_style_index % len(POPULAR_ARTISTIC_STYLES)]
+        _artistic_style_index += 1
+        mode_desc = "iconic ARTISTIC visual style"
+        print(f"   🎨 Artistic mode → style #{_artistic_style_index}: {style}")
+        return True, style, mode_desc
+    else:
+        # Photographic mode stays fully random (original behaviour)
+        categories = "National Geographic, Cinematic 4k Film Still, Magnum Photography (raw/journalistic), Drone Perspective, Kodak Portra 400, or Macro Tech Photography"
+        mode_desc = "professional PHOTOGRAPHIC visual style"
+        style_query = f"Given the news story: '{title}', pick the most fitting {mode_desc} from these categories: {categories}. Return ONLY the resulting style phrase (under 10 words) and NOTHING else."
+        style = generate_text(style_query).strip().strip('"\'-\n')
+        if not style:
+            style = "Cinematic National Geographic style"
+        print(f"   📷 Photographic mode → style: {style}")
+        return False, style, mode_desc
+
 def main():
     service = get_drive_service()
     user_opinions = ""
@@ -710,28 +767,18 @@ Details: {item['description']}"""
             else:
                 f.write(f"{script_content}\n")
 
+        # ── Visual style selection ──────────────────────────────────────────
+        # ART_PERCENTAGE controls artistic vs photographic split.
+        # Artistic styles cycle in fixed order via POPULAR_ARTISTIC_STYLES.
+        # Photographic styles remain fully random (original behaviour).
+        is_artistic_mode, image_style, mode_desc = pick_visual_style(title)
+
         anthro_chance = random.random()
         anthro_modifier = ""
         if anthro_chance > 0.5:
             anthro_types = ["anthropomorphic animals", "cute anthropomorphic cats and dogs", "anthropomorphic fantasy creatures", "anthropomorphic animals in business attire", "whimsical anthropomorphic wildlife"]
             selected_anthro = random.choice(anthro_types)
             anthro_modifier = f" KEY DIRECTIVE: Re-imagine all human subjects and participants as {selected_anthro}."
-
-        visual_mode_roll = random.random()
-        is_artistic_mode = visual_mode_roll < 0.33
-
-        if is_artistic_mode:
-            categories = "Whimsical Anime (Ghibli/Shinkai), Modern 3D (Pixar/Disney/UE5), Pop/Retro (Synthwave/LEGO/Pop Art/GTA V), or Fine Art (Ukiyo-e/Impressionism/Blueprint)"
-            mode_desc = "iconic ARTISTIC visual style"
-        else:
-            categories = "National Geographic, Cinematic 4k Film Still, Magnum Photography (raw/journalistic), Drone Perspective, Kodak Portra 400, or Macro Tech Photography"
-            mode_desc = "professional PHOTOGRAPHIC visual style"
-
-        style_query = f"Given the news story: '{title}', pick the most fitting {mode_desc} from these categories: {categories}. Return ONLY the resulting style phrase (under 10 words) and NOTHING else."
-        image_style = generate_text(style_query).strip().strip('"\'-\n')
-
-        if not image_style:
-            image_style = "Studio Ghibli style" if is_artistic_mode else "Cinematic National Geographic style"
 
         image_prompt = f"A compelling, high-quality cover thumbnail image without any text for a news story titled: '{title}'. Style: {image_style}. Details: {item['description']}.{anthro_modifier}"
 
