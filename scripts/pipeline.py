@@ -896,7 +896,6 @@ Story details: {item['description']}"""
         bg_file = os.path.join(ref_dir, "bg_music.mp3")
         final_audio = os.path.join(project_dir, "combined_audio.mp3")
 
-        import re
         blocks = re.findall(r'\[Voice:\s*(\w+)\]\s*(.*?)(?=\n>|\Z)', script_content, re.DOTALL | re.IGNORECASE)
 
         if not blocks:
