@@ -1,7 +1,16 @@
+name: Pipeline
+
 on:
   workflow_dispatch:
+    inputs:
+      generate_monthly_report:
+        description: 'Force-generate monthly report for previous month'
+        required: false
+        default: false
+        type: boolean
   schedule:
-    - cron: '0 */3 * * *'
+    - cron: '0 */3 * * *'       # every 3 hours
+    - cron: '0 2 1 * *'         # 02:00 on the 1st of every month → monthly report
 
 jobs:
   run-pipeline:
@@ -30,6 +39,10 @@ jobs:
           .venv/bin/python -m pip install --upgrade pip
           .venv/bin/python -m pip install -r requirements.txt
 
+      # -------------------------------------------------------
+      # CACHE RESTORES
+      # -------------------------------------------------------
+
       - name: Restore Antigravity Data Session
         uses: actions/cache/restore@v4
         with:
@@ -55,6 +68,10 @@ jobs:
           rm -f ~/.browser-session/SingletonCookie
           find ~/.browser-session -name "lockfile" -delete || true
 
+      # -------------------------------------------------------
+      # SYSTEM DEPENDENCIES
+      # -------------------------------------------------------
+
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -68,6 +85,10 @@ jobs:
         run: |
           curl -fsSL https://deno.land/install.sh | sh
           echo "$HOME/.deno/bin" >> $GITHUB_PATH
+
+      # -------------------------------------------------------
+      # LLM SOURCE 1: ANTIGRAVITY MANAGER (PRIMARY)
+      # -------------------------------------------------------
 
       - name: Cache Antigravity Docker Image
         uses: actions/cache@v4
@@ -103,6 +124,82 @@ jobs:
           curl -f http://127.0.0.1:8045/v1/models || echo "API still starting, proceeding..."
           sleep 10
 
+      # -------------------------------------------------------
+      # LLM SOURCE 2: GITHUB MODELS (CLOUD FALLBACK)
+      # -------------------------------------------------------
+
+      - name: Verify GitHub Models API
+        run: |
+          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer ${{ secrets.GH_MODELS_TOKEN }}" \
+            https://models.inference.ai.azure.com/models)
+          if [ "$RESPONSE" = "200" ]; then
+            echo "✅ GitHub Models API: OK"
+            echo "GH_MODELS_AVAILABLE=true" >> $GITHUB_ENV
+          else
+            echo "⚠️ GitHub Models API: HTTP $RESPONSE"
+            echo "GH_MODELS_AVAILABLE=false" >> $GITHUB_ENV
+          fi
+
+      # -------------------------------------------------------
+      # LLM SOURCE 3: CLOUDFLARE WORKERS AI
+      # -------------------------------------------------------
+
+      - name: Check Cloudflare AI accounts
+        run: |
+          .venv/bin/python scripts/check_cf_accounts.py --best > /tmp/cf_best.txt 2>&1 || true
+          CF_BEST=$(cat /tmp/cf_best.txt | tail -1 | tr -d '[:space:]')
+          if [ -n "$CF_BEST" ]; then
+            echo "✅ Cloudflare AI: healthy account → ${CF_BEST:0:12}…"
+            echo "CF_AI_AVAILABLE=true" >> $GITHUB_ENV
+          else
+            echo "⚠️ Cloudflare AI: no healthy accounts found"
+            echo "CF_AI_AVAILABLE=false" >> $GITHUB_ENV
+          fi
+        env:
+          CLOUDFLARE_ACCOUNTS_JSON: ${{ secrets.CLOUDFLARE_ACCOUNTS_JSON }}
+
+      # -------------------------------------------------------
+      # LLM SOURCE 4: OLLAMA (LOCAL LAST RESORT)
+      # -------------------------------------------------------
+
+      - name: Free up disk space for Ollama
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android
+          docker image prune -f || true
+          df -h
+
+      - name: Install and Start Ollama
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          mkdir -p logs
+          OLLAMA_HOST=0.0.0.0 ollama serve > logs/ollama_server.log 2>&1 &
+          sleep 5
+          echo "✅ Ollama server started"
+
+      - name: Cache Ollama model
+        uses: actions/cache@v4
+        id: cache-ollama-model
+        with:
+          path: ~/.ollama/models
+          key: ollama-llama3.2-3b-v1
+
+      - name: Pull Ollama model (if not cached)
+        if: steps.cache-ollama-model.outputs.cache-hit != 'true'
+        run: |
+          echo "Pulling llama3.2:3b..."
+          ollama pull llama3.2:3b
+          echo "✅ Model pulled"
+
+      - name: Verify Ollama ready
+        run: |
+          ollama list
+          echo "OLLAMA_AVAILABLE=true" >> $GITHUB_ENV
+
+      # -------------------------------------------------------
+      # CREDENTIALS
+      # -------------------------------------------------------
+
       - name: Create Google Credentials & Cookies
         run: |
           if [ -n "${{ secrets.GOOGLE_DRIVE_CREDENTIALS }}" ]; then
@@ -115,14 +212,33 @@ jobs:
             echo "${{ secrets.YOUTUBE_COOKIES }}" > cookies.txt
             echo "✅ cookies.txt deployed ($(wc -l < cookies.txt) lines)"
           else
-            echo "⚠️ YOUTUBE_COOKIES secret not set — yt-dlp may fail authentication."
+            echo "⚠️ YOUTUBE_COOKIES not set — yt-dlp may fail authentication."
           fi
+
+      # -------------------------------------------------------
+      # MAIN PIPELINE RUN
+      # -------------------------------------------------------
 
       - name: Run Pipeline
         env:
-          API_KEY: ${{ secrets.ANTIGRAVITY_API_KEY }}
-          API_BASE_URL: http://127.0.0.1:8045/v1
-          V_URL: ${{ secrets.V_URL }}
+          # Source 1 — Antigravity
+          API_KEY:          ${{ secrets.ANTIGRAVITY_API_KEY }}
+          API_BASE_URL:     http://127.0.0.1:8045/v1
+          # Source 2 — GitHub Models
+          GH_MODELS_TOKEN:    ${{ secrets.GH_MODELS_TOKEN }}
+          GH_MODELS_BASE_URL: https://models.inference.ai.azure.com
+          GH_MODEL:           gpt-4o
+          # Source 3 — Cloudflare AI (pool of accounts, auto-rotates on limit)
+          CLOUDFLARE_ACCOUNTS_JSON: ${{ secrets.CLOUDFLARE_ACCOUNTS_JSON }}
+          CF_AI_MODEL:      "@cf/meta/llama-3.1-8b-instruct"
+          # Source 4 — Ollama
+          OLLAMA_BASE_URL:  http://127.0.0.1:11434/v1
+          OLLAMA_MODEL:     llama3.2:3b
+          # Pipeline config
+          V_URL:            ${{ secrets.V_URL }}
+          TOPIC_LIMIT:      "30"
+          # Monthly report: auto on 1st-of-month run; or force via workflow_dispatch
+          GENERATE_MONTHLY_REPORT: ${{ github.event.inputs.generate_monthly_report || 'false' }}
         run: |
           mkdir -p logs
           Xvfb :99 -screen 0 1280x960x24 &
@@ -146,6 +262,10 @@ jobs:
 
           .venv/bin/python scripts/pipeline.py
 
+      # -------------------------------------------------------
+      # SAVE STATE
+      # -------------------------------------------------------
+
       - name: Save Antigravity Data Session
         if: always()
         uses: actions/cache/save@v4
@@ -159,3 +279,14 @@ jobs:
         with:
           path: ~/.browser-session
           key: v-browser-session-${{ runner.os }}-${{ github.run_id }}
+
+      - name: Ensure Ollama model directory exists
+        if: always()
+        run: mkdir -p ~/.ollama/models
+
+      - name: Save Ollama model cache
+        if: always() && steps.cache-ollama-model.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.ollama/models
+          key: ollama-llama3.2-3b-v1
