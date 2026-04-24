@@ -16,63 +16,81 @@ sys.stdout.reconfigure(encoding='utf-8')
 SCOPES = ['https://www.googleapis.com/auth/calendar.events', 'https://www.googleapis.com/auth/drive.file']
 
 def get_credentials(project_root):
+    from google.oauth2.credentials import Credentials
+    from google.auth.transport.requests import Request
+    
     creds = None
-    token_path = os.path.join(project_root, 'token.pickle')
+    token_pickle_path = os.path.join(project_root, 'token.pickle')
+    token_json_path = os.path.join(project_root, 'token.json')
     creds_path = os.path.join(project_root, 'credentials.json')
 
-    # 1. Try Loading Token from Environment Variable First (For GitHub Actions)
-    env_token = os.environ.get('GOOGLE_DRIVE_TOKEN')
-    if env_token:
-        try:
-            from google.oauth2.credentials import Credentials
-            token_dict = json.loads(env_token)
-            creds = Credentials.from_authorized_user_info(token_dict, SCOPES)
-        except Exception as e:
-            print(f"Error parsing GOOGLE_DRIVE_TOKEN: {e}")
+    # 1. Try Loading from token.json or token.pickle on disk
+    token_file = None
+    if os.path.exists(token_json_path):
+        token_file = token_json_path
+    elif os.path.exists(token_pickle_path):
+        token_file = token_pickle_path
 
-    # 2. Try Loading Token from File
-    if not creds and os.path.exists(token_path):
-        with open(token_path, 'rb') as token:
-            try:
-                creds = pickle.load(token)
-            except Exception:
-                print("Error loading token.pickle, re-authenticating.")
-                creds = None
-    
+    if token_file:
+        try:
+            with open(token_file, "rb") as f:
+                content = f.read()
+
+            if content.startswith(b"\x80"):
+                # It's a pickle format
+                pkl_creds = pickle.loads(content)
+                raw_scopes = getattr(pkl_creds, "_scopes", getattr(pkl_creds, "scopes", None))
+                granted_scopes = list(raw_scopes) if raw_scopes else SCOPES
+                creds_dict = {
+                    "token":         getattr(pkl_creds, "token", None),
+                    "refresh_token": getattr(pkl_creds, "_refresh_token", getattr(pkl_creds, "refresh_token", None)),
+                    "token_uri":     getattr(pkl_creds, "_token_uri", getattr(pkl_creds, "token_uri", "https://oauth2.googleapis.com/token")),
+                    "client_id":     getattr(pkl_creds, "_client_id", getattr(pkl_creds, "client_id", None)),
+                    "client_secret": getattr(pkl_creds, "_client_secret", getattr(pkl_creds, "client_secret", None)),
+                    "scopes":        granted_scopes,
+                }
+                creds = Credentials.from_authorized_user_info(creds_dict, granted_scopes)
+            else:
+                # It's JSON format
+                creds_dict = json.loads(content)
+                granted_scopes = creds_dict.get("scopes", SCOPES)
+                if isinstance(granted_scopes, str):
+                    granted_scopes = granted_scopes.split()
+                creds = Credentials.from_authorized_user_info(creds_dict, granted_scopes)
+        except Exception as e:
+            print(f"Error loading {token_file}: {e}")
+            creds = None
+            
     # Check if we have valid credentials
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            try:
-                creds.refresh(Request())
-            except Exception as e:
-                print(f"Error refreshing token: {e}")
-                creds = None
+    if creds and creds.expired and creds.refresh_token:
+        try:
+            creds.refresh(Request())
+        except Exception as e:
+            print(f"Error refreshing token: {e}")
+            creds = None
 
     # Verify scopes are present
     if creds and creds.valid:
         if not all(scope in creds.scopes for scope in SCOPES):
-             print(f"Missing required scopes. Current: {creds.scopes}. Re-authenticating...")
-             creds = None
+            print(f"Missing required scopes. Current: {creds.scopes}. Re-authenticating...")
+            creds = None
 
     if not creds:
-        # 3. Try Loading Client Secrets from Environment Variable if file is missing
-        env_creds = os.environ.get('GOOGLE_DRIVE_CREDENTIALS')
-        if not os.path.exists(creds_path) and env_creds:
-            print("Writing credentials.json from GOOGLE_DRIVE_CREDENTIALS env variable...")
-            with open(creds_path, 'w', encoding='utf-8') as f:
-                f.write(env_creds)
-
+        # Fallback to Interactive OAuth Flow
+        # GitHub actions creates credentials.json from GOOGLE_DRIVE_CREDENTIALS but that might be malformed if done improperly.
+        # However, in GA, we expect token.json to already exist (created by `pipeline.yml` string decode).
         if not os.path.exists(creds_path):
-            print(f"Error: {creds_path} not found.")
-            print("Please provision credentials.json from Google Cloud Console (OAuth 2.0 Desktop Client).")
+            print(f"Error: Neither token.json, token.pickle nor {creds_path} contains valid credentials.")
             return None
         
-        flow = InstalledAppFlow.from_client_secrets_file(creds_path, SCOPES)
-        creds = flow.run_local_server(port=0)
-        
-        # Save the credentials for the next run
-        with open(token_path, 'wb') as token:
-            pickle.dump(creds, token)
+        try:
+            flow = InstalledAppFlow.from_client_secrets_file(creds_path, SCOPES)
+            creds = flow.run_local_server(port=0)
+            with open(token_pickle_path, 'wb') as token:
+                pickle.dump(creds, token)
+        except Exception as e:
+            print(f"Failed to run InstalledAppFlow from {creds_path}: {e}")
+            return None
 
     return creds
 
