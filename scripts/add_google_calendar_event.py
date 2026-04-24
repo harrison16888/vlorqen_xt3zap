@@ -254,26 +254,30 @@ def upload_to_drive(service, file_path):
         print(f"Error uploading to Drive: {e}")
         return None, None
 
-def add_all_day_event(service, date_str, summary, description, attachments=None):
+def add_timed_event(service, date_str, summary, description, attachments=None):
     if attachments:
         description += "\n\n--- Attachments ---\n"
         for att in attachments:
             description += f"- {att['title']}: {att['fileUrl']}\n"
 
+    start_time = f"{date_str}T10:00:00"
+    end_time = f"{date_str}T11:00:00"
+
     event = {
         'summary': summary,
         'description': description,
-        'start': {'date': date_str},
-        'end': {'date': date_str},
+        'start': {
+            'dateTime': start_time,
+            'timeZone': 'America/Los_Angeles',
+        },
+        'end': {
+            'dateTime': end_time,
+            'timeZone': 'America/Los_Angeles',
+        },
     }
 
     if attachments:
         event['attachments'] = attachments
-
-    # End date is exclusive in all-day events
-    start_dt = datetime.datetime.strptime(date_str, '%Y-%m-%d')
-    end_dt = start_dt + datetime.timedelta(days=1)
-    event['end']['date'] = end_dt.strftime('%Y-%m-%d')
 
     try:
         result = service.events().insert(calendarId='primary', body=event, supportsAttachments=True).execute()
@@ -410,7 +414,7 @@ def main():
         print("Warning: Could not get Drive service, skipping attachments.")
 
     print(f"Total attachments to add: {len(attachments)}")
-    add_all_day_event(calendar_service, date_str, summary, content, attachments)
+    add_timed_event(calendar_service, date_str, summary, content, attachments)
 
 if __name__ == '__main__':
     main()
