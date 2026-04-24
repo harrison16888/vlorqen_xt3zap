@@ -86,16 +86,102 @@ def get_drive_service(project_root):
     if not creds: return None
     return build('drive', 'v3', credentials=creds)
 
-def build_daily_report_md(run_stats_path, target_date_str):
-    if not os.path.exists(run_stats_path):
-        print(f"Error: Stats file {run_stats_path} not found.")
-        return None, None
+def fetch_run_stats_from_drive(service, target_date_str):
+    import io
+    from googleapiclient.http import MediaIoBaseDownload
+    
+    dt = datetime.datetime.strptime(target_date_str, "%Y-%m-%d")
+    year_str = dt.strftime("%Y")
+    month_str = dt.strftime("%m")
+    
+    root_id = "1tnTb4BjVjOARRKaQjmrse4kddddj9ogj"
+    log_filename = f"pipeline_stats_{year_str}_{month_str}.jsonl"
+    
+    combined = {
+        "run_ts": f"{target_date_str} 23:59",
+        "llm_primary": "Unknown",
+        "llm_total_calls": 0, "topics_fetched": 0, "topics_approved": 0,
+        "topics_skipped": 0, "images_ok": 0, "images_failed": 0, "audio_ok": 0,
+        "titles": [], "errors": []
+    }
+    
+    try:
+        q = f"name='{log_filename}' and '{root_id}' in parents and trashed=false"
+        files = service.files().list(q=q, fields="files(id)").execute().get("files", [])
+        if files:
+            fh = io.BytesIO()
+            dl = MediaIoBaseDownload(fh, service.files().get_media(fileId=files[0]["id"]))
+            done = False
+            while not done:
+                _, done = dl.next_chunk()
+            records = [json.loads(line) for line in fh.getvalue().decode("utf-8").splitlines() if line.strip()]
+            day_records = [r for r in records if r.get("run_ts", "").startswith(target_date_str)]
+            
+            if day_records:
+                combined = day_records[-1].copy()
+                combined["llm_total_calls"] = sum(r.get("llm_total_calls", 0) for r in day_records)
+                combined["topics_fetched"] = sum(r.get("topics_fetched", 0) for r in day_records)
+                combined["topics_approved"] = sum(r.get("topics_approved", 0) for r in day_records)
+                combined["topics_skipped"] = sum(r.get("topics_skipped", 0) for r in day_records)
+                combined["images_ok"] = sum(r.get("images_ok", 0) for r in day_records)
+                combined["images_failed"] = sum(r.get("images_failed", 0) for r in day_records)
+                combined["audio_ok"] = sum(r.get("audio_ok", 0) for r in day_records)
+                combined["titles"] = list(set(t for r in day_records for t in r.get("titles", [])))
+                combined["errors"] = [err for r in day_records for err in r.get("errors", [])]
+    except Exception as e:
+        print(f"Error fetching stats log from Drive: {e}")
+
+    # Explicitly fetch ALL subfolders from today's Drive folder for accuracy
+    def find_folder(parent_id, name):
+        try:
+            q = f"name='{name}' and mimeType='application/vnd.google-apps.folder' and '{parent_id}' in parents and trashed=false"
+            files = service.files().list(q=q, fields="files(id)").execute().get("files", [])
+            return files[0]["id"] if files else None
+        except Exception: return None
 
     try:
-        with open(run_stats_path, 'r', encoding='utf-8') as f:
-            stats = json.load(f)
+        import re
+        year_id = find_folder(root_id, year_str)
+        if year_id:
+            month_id = find_folder(year_id, month_str)
+            if month_id:
+                date_id = find_folder(month_id, target_date_str)
+                if date_id:
+                    folder_q = f"'{date_id}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false"
+                    topic_folders = service.files().list(q=folder_q, fields="files(name)").execute().get("files", [])
+                    drive_titles = []
+                    for f in topic_folders:
+                        m = re.search(r"^\d{4}-(.+)", f["name"])
+                        title = m.group(1).replace("-", " ") if m else f["name"]
+                        drive_titles.append(title)
+                    if drive_titles:
+                        print(f"Found {len(drive_titles)} topics explicitly in Drive subfolders.")
+                        combined["titles"] = drive_titles
+                        if not combined.get("topics_approved"):
+                            combined["topics_approved"] = len(drive_titles)
     except Exception as e:
-        print(f"Error parsing stats JSON: {e}")
+        print(f"Error listing subfolders on Drive: {e}")
+
+    if not combined["titles"] and combined["llm_total_calls"] == 0:
+        return None  # Nothing happened today
+        
+    return combined
+
+def build_daily_report_md(run_stats_path, target_date_str, drive_service=None):
+    stats = None
+    if os.path.exists(run_stats_path):
+        try:
+            with open(run_stats_path, 'r', encoding='utf-8') as f:
+                stats = json.load(f)
+        except Exception as e:
+            print(f"Error parsing stats JSON: {e}")
+            
+    if not stats and drive_service:
+        print(f"Local {run_stats_path} missing. Attempting to fetch day stats from Google Drive...")
+        stats = fetch_run_stats_from_drive(drive_service, target_date_str)
+
+    if not stats:
+        print(f"Error: Stats for {target_date_str} not found locally or on Drive.")
         return None, None
 
     titles = stats.get('titles', [])
@@ -256,7 +342,8 @@ def main():
     run_stats_path = os.path.join(base_dir, "run_stats.json")
 
     print(f"Parsing {run_stats_path} for date {date_str}...")
-    summary, content = build_daily_report_md(run_stats_path, date_str)
+    drive_service_for_stats = get_drive_service(project_root)
+    summary, content = build_daily_report_md(run_stats_path, date_str, drive_service_for_stats)
     
     if not summary:
         print("Could not generate daily report from stats. Exiting.")
