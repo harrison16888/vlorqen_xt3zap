@@ -8,6 +8,11 @@ on:
         required: false
         default: false
         type: boolean
+      report_only:
+        description: 'Only generate report, do not process topics'
+        required: false
+        default: false
+        type: boolean
   schedule:
     - cron: '0 */3 * * *'       # every 3 hours
     - cron: '0 2 1 * *'         # 02:00 on the 1st of every month → monthly report
@@ -238,6 +243,7 @@ jobs:
           TOPIC_LIMIT:      "30"
           # Monthly report: auto on 1st-of-month run; or force via workflow_dispatch
           GENERATE_MONTHLY_REPORT: ${{ github.event.inputs.generate_monthly_report || 'false' }}
+          ONLY_GENERATE_REPORT: ${{ github.event.inputs.report_only || 'false' }}
         run: |
           mkdir -p logs
           Xvfb :99 -screen 0 1280x960x24 &

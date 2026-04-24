@@ -1105,9 +1105,13 @@ def main():
 
     pt_now = get_pacific_time()
 
-    # Monthly report: on 1st of month OR GENERATE_MONTHLY_REPORT=true
-    if pt_now.day == 1 or os.environ.get("GENERATE_MONTHLY_REPORT", "").lower() == "true":
+    report_only = "--report-only" in sys.argv or os.environ.get("ONLY_GENERATE_REPORT", "").lower() == "true"
+    # Monthly report: on 1st of month OR GENERATE_MONTHLY_REPORT=true OR report_only
+    if pt_now.day == 1 or os.environ.get("GENERATE_MONTHLY_REPORT", "").lower() == "true" or report_only:
         generate_monthly_report(service)
+        if report_only:
+            print("✅ Report generation complete. Exiting due to report-only option.")
+            return
 
     year_str  = pt_now.strftime("%Y")
     month_str = pt_now.strftime("%m")
